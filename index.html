@@ -826,46 +826,113 @@ function formProcesso(p){
 }
 
 /* ================= TRAMITAÇÃO PROCESSUAL ================= */
+let filtroTram={orgao:"",servidor:"",status:""};
+let TRAM={R:[],T:[],O:[]};
 async function renderRecomendacoes(){
   app.innerHTML=`<div class="empty">Carregando…</div>`;
   await loadProcessos();
   const {data:recs}=await sb.from("recomendacoes").select("*").order("created_at",{ascending:false});
   const {data:trats}=await sb.from("tratativas").select("*").order("data",{ascending:true});
+  let O=[];
+  try{const {data:obs}=await sb.from("observacoes").select("*").order("data",{ascending:true});O=obs||[];}catch(e){O=[];}
   const R=recs||[], T=trats||[];
   // vincula tratativas antigas (por recomendação) ao processo
   T.forEach(t=>{if(!t.processo_id&&t.recomendacao_id){const r=R.find(x=>x.id===t.recomendacao_id);if(r)t.processo_id=r.processo_id;}});
-  const procCom=PROCESSOS.filter(p=>p.gera_recomendacao||R.some(r=>r.processo_id===p.id)||T.some(t=>t.processo_id===p.id));
+  TRAM={R,T,O};
+  const servOpts=[...AUX.servidores].sort(byPt('nome')).map(s=>`<option>${esc(s.nome)}</option>`).join("");
+  const orgOpts=[...AUX.orgaos].sort(byPt('sigla')).map(o=>`<option value="${esc(o.sigla)}">${esc(o.sigla)} — ${esc(o.nome)}</option>`).join("");
+  const statusOpts=[...AUX.status].sort(byPt()).map(s=>`<option>${esc(s)}</option>`).join("");
   const procOpt=[...PROCESSOS].sort(byPt('numero_sei')).map(p=>`<option value="${p.id}">${esc(p.numero_sei||'(sem SEI)')} — ${esc(p.subarea||p.area||'')}</option>`).join("");
   app.innerHTML=`<div class="card pad">
     <div class="toolbar">
       <h2 class="sec" style="margin-right:auto">Tramitação Processual</h2>
       <select id="rproc"><option value="">Selecione um processo…</option>${procOpt}</select>
       <button class="btn primary" id="addtrat" disabled>Inserir Tratativa</button>
-      <button class="btn ghost" id="addrec" disabled>+ Recomendação</button>
+      <button class="btn ghost" id="addobs" disabled>Incluir Observações</button>
     </div>
-    <p class="lead">Registre as tratativas (documentos e providências) de cada processo. Recomendações continuam disponíveis para os processos que as geram.</p>
-    <div id="reclist">${
-      procCom.length? procCom.map(p=>blocoProcessoRec(p,R,T)).join("")
-      : `<div class="empty">Nenhuma tramitação registrada ainda. Selecione um processo acima e clique em <b>Inserir Tratativa</b>.</div>`
-    }</div>
+    <div class="toolbar">
+      <select id="tforgao"><option value="">Todos os órgãos</option>${orgOpts}</select>
+      <select id="tfserv"><option value="">Todos os servidores</option>${servOpts}</select>
+      <select id="tfstatus"><option value="">Todas as situações</option>${statusOpts}</select>
+      <span class="muted small" style="margin-left:auto" id="tfcount"></span>
+    </div>
+    <p class="lead">Registre as tratativas, observações e recomendações de cada processo.</p>
+    <div id="reclist"></div>
   </div>`;
   const sel=$("#rproc");
-  sel.onchange=()=>{$("#addtrat").disabled=!sel.value;$("#addrec").disabled=!sel.value;};
+  sel.onchange=()=>{$("#addtrat").disabled=!sel.value;$("#addobs").disabled=!sel.value;};
   $("#addtrat").onclick=()=>{if(sel.value)formTratativa(sel.value);};
-  $("#addrec").onclick=()=>{if(sel.value)formRecomendacao(sel.value);};
+  $("#addobs").onclick=()=>{if(sel.value)formObservacao(sel.value);};
+  $("#tforgao").value=filtroTram.orgao;$("#tforgao").onchange=e=>{filtroTram.orgao=e.target.value;drawTram();};
+  $("#tfserv").value=filtroTram.servidor;$("#tfserv").onchange=e=>{filtroTram.servidor=e.target.value;drawTram();};
+  $("#tfstatus").value=filtroTram.status;$("#tfstatus").onchange=e=>{filtroTram.status=e.target.value;drawTram();};
+  drawTram();
 }
-function blocoProcessoRec(p,R,T){
+function drawTram(){
+  const {R,T,O}=TRAM;
+  let procCom=PROCESSOS.filter(p=>p.gera_recomendacao||R.some(r=>r.processo_id===p.id)||T.some(t=>t.processo_id===p.id)||O.some(o=>o.processo_id===p.id));
+  procCom=procCom.filter(p=>{
+    if(filtroTram.orgao && !String(p.orgao_demandado||"").includes(filtroTram.orgao))return false;
+    if(filtroTram.servidor && p.servidor!==filtroTram.servidor)return false;
+    if(filtroTram.status && p.status!==filtroTram.status)return false;
+    return true;
+  });
+  const box=$("#reclist");if(!box)return;
+  box.innerHTML=procCom.length?procCom.map(p=>blocoProcessoRec(p,R,T,O)).join("")
+    :`<div class="empty">Nenhum processo encontrado com esses filtros. Selecione um processo acima e clique em <b>Inserir Tratativa</b>.</div>`;
+  const c=$("#tfcount");if(c)c.textContent=procCom.length+" processo(s)";
+  // checkbox NET acatada — grava direto no processo
+  box.querySelectorAll("[data-net]").forEach(cb=>cb.onchange=async()=>{
+    const id=cb.dataset.net;
+    const {error}=await sb.from("processos").update({net_acatada:cb.checked,updated_at:new Date().toISOString()}).eq("id",id);
+    if(error){toast("Erro: "+error.message);cb.checked=!cb.checked;return;}
+    const pr=PROCESSOS.find(x=>x.id===id);if(pr)pr.net_acatada=cb.checked;
+    toast(cb.checked?"Notificação marcada como acatada.":"Marcação removida.");
+  });
+}
+function blocoProcessoRec(p,R,T,O){
+  O=O||[];
   const recs=R.filter(r=>r.processo_id===p.id);
   const tratsProc=T.filter(t=>t.processo_id===p.id);
+  const obsProc=O.filter(o=>o.processo_id===p.id);
+  const siglas=(p.orgaos&&p.orgaos.length?p.orgaos:String(p.orgao_demandado||'').split('; ')).filter(Boolean).map(o=>String(o).split(' — ')[0]).join(', ');
   return `<div class="card pad" style="margin-bottom:16px">
-    <h3 style="margin:0 0 4px">${esc(p.numero_sei||'(sem SEI)')} ${p.link_sei?`<a href="${esc(p.link_sei)}" target="_blank" rel="noopener" class="small">🔗 SEI</a>`:''} <span class="muted small">· ${esc(p.subarea||p.area||'')} · ${servChip(p.servidor)}</span></h3>
+    <h3 style="margin:0 0 4px">${esc(p.numero_sei||'(sem SEI)')} ${p.link_sei?`<a href="${esc(p.link_sei)}" target="_blank" rel="noopener" class="small">🔗 SEI</a>`:''} <span class="muted small">· ${esc(p.subarea||p.area||'')}</span></h3>
+    <div class="muted small" style="margin-bottom:8px">${servChip(p.servidor)} · ${esc(siglas||'sem órgão')} · ${statusChip(p.status)}</div>
+    <label class="check" style="margin-bottom:10px"><input type="checkbox" data-net="${p.id}" ${p.net_acatada?'checked':''}>
+      <span>Notificação / Nota de Esclarecimento Técnico acatada<span class="hint">Mesma marcação da edição do processo; alimenta o gráfico do Painel.</span></span></label>
     ${tratsProc.length?tratsProc.map(t=>`<div class="trat">${t.tipo?`<span class="chip blue">${esc(t.tipo)}</span> `:''}${esc(t.texto)}<div class="meta">${esc(t.autor||'—')} · ${fmtDate(t.data)}</div></div>`).join(""):''}
+    ${obsProc.length?obsProc.map(o=>`<div class="trat" style="border-left-color:var(--amarelo);background:#fffdf5"><span class="chip amber">Observação</span> ${esc(o.texto)}<div class="meta">${esc(o.autor||'—')} · ${fmtDate(o.data)}</div></div>`).join(""):''}
     ${recs.length?recs.map(r=>`<div class="rec"><h4>${r.numero?esc('Recomendação Nº '+r.numero+' — '):'Recomendação — '}${esc(r.texto||'')}</h4>
-        <div class="muted small">Destinatário(s): ${esc((r.destinatarios&&r.destinatarios.length)?r.destinatarios.map(d=>String(d).split(' — ')[0]).join(', '):'—')} · Emissão: ${fmtDate(r.data_emissao)} · ${statusChip(r.status||'Aberta')}</div>
+        <div class="muted small">Destinatário(s): ${esc((r.destinatarios&&r.destinatarios.length)?r.destinatarios.map(d=>String(d).split(' — ')[0]).join(', '):'—')} · Emissão: ${fmtDate(r.data_emissao)} · ${statusChip(p.status)}</div>
         ${r.observacoes?`<div class="muted small" style="margin-top:4px">Obs.: ${esc(r.observacoes)}</div>`:''}
       </div>`).join(""):''}
-    ${(!tratsProc.length&&!recs.length)?`<p class="muted small">Sem tratativas registradas ainda.</p>`:''}
+    ${(!tratsProc.length&&!recs.length&&!obsProc.length)?`<p class="muted small">Sem registros de tramitação ainda.</p>`:''}
   </div>`;
+}
+function formObservacao(processoId){
+  const autorOpt=`<option value="">Selecione…</option>`+[...AUX.servidores].sort(byPt('nome')).map(s=>`<option>${esc(s.nome)}</option>`).join("");
+  modalRoot.innerHTML=`<div class="overlay"><div class="modal" style="max-width:620px">
+    <div class="modal-head"><h3>Incluir Observações</h3><button class="x" id="mx">×</button></div>
+    <div class="modal-body">
+      <div class="frow one"><div><label class="f">Observações</label><textarea id="otexto" class="tall"></textarea></div></div>
+      <div class="frow">
+        <div><label class="f">Autor</label><select id="oautor">${autorOpt}</select></div>
+        <div><label class="f">Data</label><input type="date" id="odata" value="${today()}"></div>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn ghost" id="cancel">Cancelar</button><button class="btn primary" id="save">Salvar</button></div>
+  </div></div>`;
+  const close=()=>modalRoot.innerHTML="";
+  $("#mx").onclick=close;$("#cancel").onclick=close;
+  $("#save").onclick=async()=>{
+    const texto=$("#otexto").value.trim();
+    if(!texto){toast("Escreva a observação.");return;}
+    const rec={processo_id:processoId,texto,autor:$("#oautor").value||null,data:$("#odata").value||today()};
+    const {error}=await sb.from("observacoes").insert(rec);
+    if(error){toast("Erro: "+error.message);return;}
+    close();toast("Observação registrada.");renderRecomendacoes();
+  };
 }
 function formTratativa(processoId){
   const tiposOpt=`<option value="">Selecione…</option>`+[...AUX.tipos_tratativa].sort(byPt()).map(t=>`<option>${esc(t)}</option>`).join("");
