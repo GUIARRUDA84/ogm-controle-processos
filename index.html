@@ -257,6 +257,9 @@ function byPt(f){return (a,b)=>String(f?a[f]:a).localeCompare(String(f?b[f]:b),'
 const $ = (s,r=document)=>r.querySelector(s);
 const app = $("#app");
 const modalRoot = $("#modal-root");
+// liga um evento com segurança: se o elemento não existir, apenas ignora
+// (evita que um seletor obsoleto interrompa o restante do formulário)
+function on(sel,ev,fn){const el=(typeof sel==="string")?$(sel):sel;if(el)el.addEventListener(ev,fn);return el;}
 
 function toast(msg){const t=$("#toast");t.textContent=msg;t.classList.add("show");setTimeout(()=>t.classList.remove("show"),2600);}
 function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
@@ -946,8 +949,6 @@ function formProcesso(p){
 
   // ODS toggle
   $("#odsbox").addEventListener("click",e=>{const o=e.target.closest(".odsopt");if(o)o.classList.toggle("on");});
-  // Órgãos demandados (toggle)
-  $("#orgbox").addEventListener("click",e=>{const o=e.target.closest(".odsopt");if(o)o.classList.toggle("on");});
   // ---------- MANIFESTAÇÕES (desmembramento) ----------
   let MANIFS=[];
   const orgListOpts=[...AUX.orgaos].sort(byPt('sigla'))
