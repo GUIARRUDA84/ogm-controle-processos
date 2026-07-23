@@ -433,7 +433,8 @@ async function loadAuxAntigo(){
     servidores:"aux_servidores", unidades:"aux_unidades", orgaos:"aux_orgaos",
     tipos_demanda:"aux_tipos_demanda", tipos_documento:"aux_tipos_documento", status:"aux_status",
     predios:"aux_predios", tipos_tratativa:"aux_tipos_tratativa",
-    tipos_irregularidade:"aux_tipos_irregularidade", feriados:"aux_feriados"
+    tipos_irregularidade:"aux_tipos_irregularidade", feriados:"aux_feriados",
+    hipoteses_inabilit:"aux_hipoteses_inabilitacao"
   };
   // busca todas as tabelas EM PARALELO (antes era uma após a outra)
   const chaves=Object.keys(map);
@@ -461,6 +462,12 @@ function fallback(k){
   if(k==="tipos_tratativa")return SEED.tipos_tratativa||[];
   if(k==="tipos_irregularidade")return SEED.tipos_irregularidade||[];
   if(k==="feriados")return [];
+  if(k==="hipoteses_inabilit"){ // deriva da taxonomia oficial, se a tabela não existir
+    return (AUX.taxonomia||SEED.taxonomia||[])
+      .filter(t=>t.area==="Gestão de manifestações"&&/^Não habilitada/.test(t.subarea||""))
+      .map(t=>({nome:String(t.subarea).replace(/^Não habilitada\s*-\s*/,""),fundamento:t.descricao||""}))
+      .filter(x=>hipAplicavel(x.nome));
+  }
   return [];
 }
 
@@ -574,13 +581,14 @@ async function renderPainel(){
   let CGM={total:0,adm:0,inadm:0,valor:0,prio:[],tipo:[]};
   try{
     const {data:ad}=await sb.from("admissibilidade_cgm")
-      .select("resultado,prioridade,tipo_irregularidade,valor_estimado");
+      .select("resultado,habilitacao,prioridade,tipo_irregularidade,valor_estimado");
     const A=ad||[];
     const g=(campo)=>{const m={};A.forEach(x=>{const k=x[campo]||"(sem)";m[k]=(m[k]||0)+1;});
       return Object.entries(m).sort((a,b)=>b[1]-a[1]);};
+    const okv=x=>(x.habilitacao||x.resultado)==='Habilitada'||x.resultado==='Admissível';
     CGM={total:A.length,
-      adm:A.filter(x=>x.resultado==='Admissível').length,
-      inadm:A.filter(x=>x.resultado==='Inadmissível').length,
+      adm:A.filter(okv).length,
+      inadm:A.filter(x=>!okv(x)).length,
       valor:A.reduce((s,x)=>s+(Number(x.valor_estimado)||0),0),
       prio:g('prioridade'), tipo:g('tipo_irregularidade').slice(0,8)};
   }catch(e){}
@@ -644,12 +652,12 @@ async function renderPainel(){
     <div class="sec-title">Integração com a Controladoria-Geral (CGM)</div>
     <div class="kpis">
       <div class="card kpi b"><div class="n">${CGM.total}</div><div class="l">Processos vinculados à CGM</div><div class="sub2">${total?Math.round(CGM.total/total*100):0}% do total</div></div>
-      <div class="card kpi g"><div class="n">${CGM.adm}</div><div class="l">Admissíveis</div><div class="sub2">${CGM.total?Math.round(CGM.adm/CGM.total*100):0}% dos vinculados</div></div>
-      <div class="card kpi r"><div class="n">${CGM.inadm}</div><div class="l">Inadmissíveis</div><div class="sub2">${CGM.total?Math.round(CGM.inadm/CGM.total*100):0}% dos vinculados</div></div>
+      <div class="card kpi g"><div class="n">${CGM.adm}</div><div class="l">Habilitadas</div><div class="sub2">${CGM.total?Math.round(CGM.adm/CGM.total*100):0}% dos vinculados</div></div>
+      <div class="card kpi r"><div class="n">${CGM.inadm}</div><div class="l">Inabilitadas</div><div class="sub2">${CGM.total?Math.round(CGM.inadm/CGM.total*100):0}% dos vinculados</div></div>
       <div class="card kpi y"><div class="n" style="font-size:22px">R$ ${CGM.valor.toLocaleString('pt-BR',{maximumFractionDigits:0})}</div><div class="l">Valor estimado acumulado</div><div class="sub2">soma das apurações</div></div>
     </div>
     <div class="charts">
-      <div class="card chart-card"><h3>Admissibilidade</h3><p class="cap">Resultado do juízo de admissibilidade</p><div class="chart-box"><canvas id="ch_adm"></canvas></div></div>
+      <div class="card chart-card"><h3>Habilitação</h3><p class="cap">Resultado da habilitação feita pela Ouvidoria</p><div class="chart-box"><canvas id="ch_adm"></canvas></div></div>
       <div class="card chart-card"><h3>Por prioridade</h3><p class="cap">Materialidade, relevância e criticidade</p><div class="chart-box"><canvas id="ch_prio"></canvas></div></div>
       <div class="card chart-card"><h3>Por tipo de irregularidade</h3><p class="cap">Top 8 enquadramentos</p><div class="chart-box tallbox"><canvas id="ch_tipoirr"></canvas></div></div>
     </div>
@@ -689,7 +697,7 @@ async function renderPainel(){
   mkChart('ch_net','bar',['Emitidas','Acatadas','Não acatadas'],
     [S.net_emit||0,S.net_acat||0,Math.max(0,(S.net_emit||0)-(S.net_acat||0))],{colors:['#0056EF','#20BF40','#E23B2E']});
   mkChart('ch_bairro','bar',dBairro.map(x=>x[0]),dBairro.map(x=>x[1]),{horizontal:true,color:'#9A6A00'});
-  mkChart('ch_adm','doughnut',['Admissível','Inadmissível'],[CGM.adm,CGM.inadm]);
+  mkChart('ch_adm','doughnut',['Habilitada','Inabilitada'],[CGM.adm,CGM.inadm]);
   const ordemPrio=['Urgente','Alta','Média','Baixa'];
   const prioOrd=ordemPrio.map(p=>[p,(CGM.prio.find(x=>x[0]===p)||[0,0])[1]]).filter(x=>x[1]>0);
   mkChart('ch_prio','bar',prioOrd.map(x=>x[0]),prioOrd.map(x=>x[1]),
@@ -1065,26 +1073,73 @@ function formProcesso(p){
           </div>
           <div class="frow one"><div><label class="f">Objeto da manifestação</label>
             <textarea data-c="descricao" data-i="${i}" placeholder="Descreva o que está sendo demandado deste órgão">${esc(m.descricao||'')}</textarea></div></div>
-          <div class="frow">
-            <div><label class="f">Área <span class="hint">Opcional — use quando o desmembramento tratar de tema diferente.</span></label>
-              <select data-c="area" data-i="${i}"><option value="">Mesma do processo</option>${areaListOpts}</select></div>
+          <div class="frow three">
+            <div><label class="f">Área</label>
+              <select data-c="area" data-i="${i}"><option value="">Selecione…</option>${areaListOpts}</select></div>
+            <div><label class="f">Subárea</label>
+              <select data-c="subarea" data-i="${i}"><option value="">Selecione a área primeiro</option></select></div>
             <div><label class="f">Prazo</label><input type="date" data-c="prazo" data-i="${i}" value="${esc(m.prazo||'')}"></div>
           </div>
+          <div class="desc-sub" data-desc="${i}"></div>
+          <label class="f">ODS vinculado(s)<span class="hint">A subárea marca o ODS correspondente; clique para (des)marcar.</span></label>
+          <div class="odsbox" data-odsbox="${i}">${
+            (AUX.ods||[]).map(o=>`<span class="odsopt ${(m.ods||[]).map(Number).includes(o.numero)?'on':''}" data-ods="${o.numero}" data-i="${i}" title="${esc(o.descricao||'')}">${o.numero} · ${esc(o.nome)}</span>`).join("")
+          }</div>
         </div>`).join("");
-      // repõe os valores selecionados
+      // repõe os valores selecionados e monta as subáreas dependentes
       MANIFS.forEach((m,i)=>{
         const g=c=>box.querySelector(`[data-c="${c}"][data-i="${i}"]`);
         if(g("orgao"))g("orgao").value=m.orgao||"";
         if(g("status"))g("status").value=m.status||"";
-        if(g("area"))g("area").value=m.area||"";
+        if(g("area")){g("area").value=m.area||"";}
+        preencheSubarea(i,m.subarea||"");
+        mostraDescSub(i);
       });
     }
     const t=$("#manif_total");
     if(t)t.textContent=MANIFS.length?`${MANIFS.length} manifestação(ões) neste processo`:"";
   }
 
-  $("#add_manif").onclick=()=>{MANIFS.push({orgao:"",descricao:"",status:"",area:"",prazo:""});pintaManifs();};
+  // subárea dependente da área, dentro de cada manifestação
+  function preencheSubarea(i,valor){
+    const box=$("#manif_list");if(!box)return;
+    const selA=box.querySelector(`[data-c="area"][data-i="${i}"]`);
+    const selS=box.querySelector(`[data-c="subarea"][data-i="${i}"]`);
+    if(!selA||!selS)return;
+    const area=selA.value;
+    const subs=AUX.taxonomia.filter(t=>t.area===area);
+    selS.innerHTML=`<option value="">${area?'Selecione…':'Selecione a área primeiro'}</option>`+
+      subs.map(s=>`<option>${esc(s.subarea)}</option>`).join("");
+    if(valor)selS.value=valor;
+  }
+  function mostraDescSub(i){
+    const box=$("#manif_list");if(!box)return;
+    const d=box.querySelector(`[data-desc="${i}"]`);if(!d)return;
+    const m=MANIFS[i]||{};
+    const t=AUX.taxonomia.find(x=>x.area===m.area&&x.subarea===m.subarea);
+    if(t&&t.descricao){d.textContent=t.descricao;d.classList.add("show");}
+    else{d.classList.remove("show");}
+  }
+  function marcaOdsDaSubarea(i){
+    const box=$("#manif_list");if(!box)return;
+    const m=MANIFS[i]||{};
+    const t=AUX.taxonomia.find(x=>x.area===m.area&&x.subarea===m.subarea);
+    if(!t||!t.ods)return;
+    const chip=box.querySelector(`[data-odsbox="${i}"] .odsopt[data-ods="${t.ods}"]`);
+    if(chip)chip.classList.add("on");
+    m.ods=[...new Set([...(m.ods||[]).map(Number),Number(t.ods)])];
+  }
+
+  $("#add_manif").onclick=()=>{MANIFS.push({orgao:"",descricao:"",status:"",area:"",subarea:"",ods:[],prazo:""});pintaManifs();};
   $("#manif_list").addEventListener("click",e=>{
+    const ods=e.target.closest(".odsopt");
+    if(ods){
+      const i=Number(ods.dataset.i);
+      ods.classList.toggle("on");
+      MANIFS[i].ods=[...$("#manif_list").querySelectorAll(`[data-odsbox="${i}"] .odsopt.on`)]
+        .map(x=>Number(x.dataset.ods));
+      return;
+    }
     const dup=e.target.closest("[data-dup]"), del=e.target.closest("[data-del]");
     if(dup){const i=Number(dup.dataset.dup);
       MANIFS.splice(i+1,0,Object.assign({},MANIFS[i],{id:null,orgao:""}));pintaManifs();
@@ -1098,7 +1153,10 @@ function formProcesso(p){
   });
   $("#manif_list").addEventListener("change",e=>{
     const el=e.target.closest("[data-c]");if(!el)return;
-    MANIFS[Number(el.dataset.i)][el.dataset.c]=el.value;
+    const i=Number(el.dataset.i), c=el.dataset.c;
+    MANIFS[i][c]=el.value;
+    if(c==="area"){MANIFS[i].subarea="";preencheSubarea(i,"");mostraDescSub(i);}
+    if(c==="subarea"){mostraDescSub(i);marcaOdsDaSubarea(i);}
   });
 
   // carrega as manifestações existentes; se não houver, deriva dos órgãos já cadastrados
@@ -1106,9 +1164,10 @@ function formProcesso(p){
     sb.from("manifestacoes").select("*").eq("processo_id",p.id).order("sequencia")
       .then(({data})=>{
         if(data&&data.length){MANIFS=data.map(m=>({id:m.id,orgao:m.orgao||"",descricao:m.descricao||"",
-          status:m.status||"",area:m.area||"",prazo:m.prazo||""}));}
+          status:m.status||"",area:m.area||"",subarea:m.subarea||"",ods:(m.ods||[]).map(Number),prazo:m.prazo||""}));}
         else{const antigos=(p.orgaos&&p.orgaos.length)?p.orgaos:String(p.orgao_demandado||"").split("; ").filter(Boolean);
-          MANIFS=antigos.map(o=>({orgao:o,descricao:"",status:"",area:"",prazo:""}));}
+          MANIFS=antigos.map(o=>({orgao:o,descricao:"",status:"",
+            area:p.area||"",subarea:p.subarea||"",ods:(p.ods||[]).map(Number),prazo:""}));}
         pintaManifs();
       });
   }else{ pintaManifs(); }
@@ -1147,12 +1206,13 @@ function formProcesso(p){
     const box=$("#cgm_resumo");
     if(!$("#vinculo_cgm").checked){box.innerHTML="";return;}
     if(!admiss && !admissCodigo){
-      box.innerHTML=`<div class="cgm-box"><h4>Admissibilidade pendente</h4>
-        <p class="muted small" style="margin:0 0 10px">Preencha o questionário para validar o encaminhamento à CGM.</p>
-        <button type="button" class="btn primary sm" id="abrir_adm">Preencher critérios de admissibilidade</button></div>`;
+      box.innerHTML=`<div class="cgm-box"><h4>Habilitação pendente</h4>
+        <p class="muted small" style="margin:0 0 10px">Preencha os critérios de habilitação para validar o encaminhamento à CGM.</p>
+        <button type="button" class="btn primary sm" id="abrir_adm">Preencher critérios de habilitação</button></div>`;
     }else{
       const a=admiss||{};
       const res=a.resultado||"—", pri=a.prioridade||"—", pt=(a.pontuacao!=null?a.pontuacao:"—");
+      const hab=a.habilitacao||a.resultado||null;
       const extra=[a.tipo_irregularidade?esc(a.tipo_irregularidade):null,
         a.valor_estimado?("R$ "+Number(a.valor_estimado).toLocaleString('pt-BR',{minimumFractionDigits:2})):null,
         a.responsavel?("Analista: "+esc(a.responsavel)):null].filter(Boolean).join(" · ");
@@ -1162,7 +1222,7 @@ function formProcesso(p){
            <button type="button" class="btn ghost sm" id="copiar_cod" style="margin-left:8px">Copiar</button>`
           :`<p class="muted small" style="margin:0">O identificador único será gerado ao salvar o processo.</p>`}
         <div class="placar" style="margin-top:10px">
-          <span class="veredito ${res==='Admissível'?'ok':'no'}">${esc(res)}</span>
+          <span class="veredito ${(hab||res)==='Habilitada'?'ok':'no'}">${esc(hab||res||'—')}</span>
           <span class="muted small">Prioridade: <b>${esc(pri)}</b></span>
           <span class="muted small">Pontuação: <b>${pt}/12</b></span>
           <button type="button" class="btn ghost sm" id="abrir_adm" style="margin-left:auto">Rever critérios</button>
@@ -1381,7 +1441,8 @@ function formProcesso(p){
         if(manifValidas.length){
           const linhas=manifValidas.map((m,i)=>({processo_id:procId,sequencia:i+1,
             orgao:m.orgao||null,descricao:m.descricao||null,status:m.status||null,
-            area:m.area||null,prazo:m.prazo||null}));
+            area:m.area||null,subarea:m.subarea||null,ods:(m.ods||[]).map(Number),
+            prazo:m.prazo||null}));
           const {error:em}=await sb.from("manifestacoes").insert(linhas);
           if(em)toast("Processo salvo, mas as manifestações falharam: "+em.message);
         }
@@ -1430,11 +1491,21 @@ const CRITS=[
  ["c_verossimilhanca","Verossimilhança","Elementos que sustentam o relato.",
   ["Sem elementos","Relato circunstanciado","Com documentos","Com provas robustas"]]
 ];
+// hipóteses próprias de outras tipologias — não se aplicam a denúncias
+const HIP_FORA_DENUNCIA=[/Recurso LAI/i,/Dados pessoais inconsistentes/i,/Dentro do prazo contido na Carta de Servi/i];
+function hipAplicavel(nome){return !HIP_FORA_DENUNCIA.some(rx=>rx.test(nome||""));}
+function hipotesesInab(){
+  const l=(AUX.hipoteses_inabilit&&AUX.hipoteses_inabilit.length)?AUX.hipoteses_inabilit:[];
+  const base = l.length? l : (AUX.taxonomia||[])
+    .filter(t=>t.area==="Gestão de manifestações"&&/^Não habilitada/.test(t.subarea||""))
+    .map(t=>({nome:String(t.subarea).replace(/^Não habilitada\s*-\s*/,""),fundamento:t.descricao||""}));
+  return base.filter(x=>hipAplicavel(x.nome));
+}
 function calcAdmiss(d){
   const reqOk=REQS.every(r=>!!d[r[0]]);
   const pt=CRITS.reduce((s,c)=>s+(Number(d[c[0]])||0),0);
   const pri=pt<=3?"Baixa":pt<=6?"Média":pt<=9?"Alta":"Urgente";
-  return {reqOk,pontuacao:pt,prioridade:pri,sugestao:reqOk?"Admissível":"Inadmissível"};
+  return {reqOk,pontuacao:pt,prioridade:pri,sugestao:reqOk?"Habilitada":"Inabilitada"};
 }
 function formAdmissibilidade(atual,onSave){
   const d=Object.assign({c_materialidade:0,c_relevancia:0,c_criticidade:0,c_verossimilhanca:0},atual||{});
@@ -1443,11 +1514,26 @@ function formAdmissibilidade(atual,onSave){
   const respOpt=`<option value="">Selecione…</option>`+[...AUX.servidores].sort(byPt('nome'))
     .map(s=>`<option ${s.nome===d.responsavel?'selected':''}>${esc(s.nome)}</option>`).join("");
   modalRoot.innerHTML=`<div class="overlay"><div class="modal" style="max-width:860px">
-    <div class="modal-head"><h3>Critérios de admissibilidade — encaminhamento à CGM</h3><button class="x" id="mx">×</button></div>
+    <div class="modal-head"><h3>Critérios de Habilitação</h3><button class="x" id="mx">×</button></div>
     <div class="modal-body">
-      <p class="lead">A validação abaixo registra o juízo de admissibilidade da manifestação. Ao salvar o processo, o sistema gera um <b>identificador único</b> que permite à Controladoria rastrear a demanda de ponta a ponta.</p>
+      <p class="lead">Esta tela <b>habilita ou inabilita</b> denúncias que poderão ser encaminhadas à Controladoria-Geral do Município. O juízo de <b>admissibilidade</b> será realizado, em momento posterior, pela própria CGM, tendo esta habilitação como subsídio. Ao salvar, o sistema gera um <b>identificador único</b> que permite à Controladoria rastrear a demanda de ponta a ponta.</p>
 
-      <fieldset><legend>1. Requisitos de admissibilidade (eliminatórios)</legend>
+      <fieldset><legend>1. Hipóteses de inabilitação</legend>
+        <p class="muted small" style="margin:0 0 10px">Marque as hipóteses que se aplicam. Havendo qualquer hipótese marcada, a denúncia é <b>inabilitada</b> e não é encaminhada à CGM.</p>
+        <div id="hip_list">${hipotesesInab().map((x,i)=>`
+          <label class="check" style="padding:7px 0;border-bottom:1px dashed var(--linha)">
+            <input type="checkbox" class="hip" data-nome="${esc(x.nome)}" ${(d.hipoteses_inabilit||[]).includes(x.nome)?'checked':''}>
+            <span>${esc(x.nome)}<span class="hint">${esc(x.fundamento||'')}</span></span></label>`).join("")}
+        </div>
+        <div class="placar" id="placar_hab" style="margin-top:12px"></div>
+        <div class="frow one" style="margin-top:12px">
+          <div><label class="f">Motivo da inabilitação<span class="hint">Preenchido automaticamente com as hipóteses marcadas.</span></label>
+            <input id="motivo_inab" value="${esc(d.motivo_inabilitacao||'')}"></div>
+        </div>
+      </fieldset>
+
+      <fieldset id="fs_admiss"><legend>2. Requisitos de habilitação</legend>
+        <p class="muted small" style="margin:0 0 10px">Todos os requisitos precisam ser atendidos para que a denúncia seja <b>habilitada</b>. A ausência de qualquer um deles conduz à <b>inabilitação</b>.</p>
         ${REQS.map(r=>`<div class="crit"><div><b>${esc(r[1])}</b><span class="desc">${esc(r[2])}</span></div>
           <div class="simnao" data-req="${r[0]}">
             <button type="button" class="sim ${d[r[0]]===true?'on':''}" data-v="1">Sim</button>
@@ -1455,22 +1541,23 @@ function formAdmissibilidade(atual,onSave){
           </div></div>`).join("")}
       </fieldset>
 
-      <fieldset><legend>2. Critérios de priorização</legend>
+      <fieldset><legend>3. Critérios de priorização — subsídio à CGM</legend>
+        <p class="muted small" style="margin:0 0 10px">Não interferem na habilitação. Servem de subsídio para a Controladoria priorizar a apuração.</p>
         ${CRITS.map(c=>`<div class="frow one" style="margin-bottom:10px"><div>
           <label class="f">${esc(c[1])}<span class="hint">${esc(c[2])}</span></label>
           <select id="${c[0]}">${c[3].map((o,i)=>`<option value="${i}" ${Number(d[c[0]])===i?'selected':''}>${i} — ${esc(o)}</option>`).join("")}</select>
         </div></div>`).join("")}
       </fieldset>
 
-      <fieldset><legend>3. Enquadramento e decisão</legend>
+      <fieldset><legend>4. Enquadramento e decisão da Ouvidoria</legend>
         <div class="frow">
           <div><label class="f">Tipo de irregularidade</label><select id="tipo_irreg">${tipoOpt}</select></div>
           <div><label class="f">Valor estimado (R$)</label><input type="number" step="0.01" id="valor_est" value="${esc(d.valor_estimado??'')}"></div>
         </div>
         <div class="placar" id="placar"></div>
         <div class="frow" style="margin-top:12px">
-          <div><label class="f">Decisão<span class="hint">O sistema sugere com base nos critérios; a decisão final é do analista.</span></label>
-            <select id="resultado"><option>Admissível</option><option>Inadmissível</option></select></div>
+          <div><label class="f">Decisão da Ouvidoria<span class="hint">O sistema sugere com base nos blocos 1 e 2; a decisão final é do analista.</span></label>
+            <select id="resultado"><option>Habilitada</option><option>Inabilitada</option></select></div>
           <div><label class="f">Responsável pela análise</label><select id="responsavel">${respOpt}</select></div>
         </div>
         <div class="frow one"><div><label class="f">Fundamentação<span class="hint">Obrigatória quando a decisão divergir da sugestão do sistema.</span></label>
@@ -1486,6 +1573,24 @@ function formAdmissibilidade(atual,onSave){
   const close=()=>modalRoot.innerHTML="";
   $("#mx").onclick=close;$("#cancel").onclick=close;
 
+  // ---- habilitação ----
+  function hipMarcadas(){return [...document.querySelectorAll(".hip:checked")].map(x=>x.dataset.nome);}
+  function atualizaHab(){
+    const marcadas=hipMarcadas();
+    const inab=marcadas.length>0;
+    const box=$("#placar_hab");
+    box.innerHTML=`<span class="veredito ${inab?'no':'ok'}">${inab?'Inabilitada':'Sem hipótese de inabilitação'}</span>
+      <span class="muted small">${inab?marcadas.length+' hipótese(s) marcada(s)':'A habilitação depende dos requisitos do bloco 2.'}</span>`;
+    $("#motivo_inab").value=marcadas.join("; ");
+    // hipótese marcada: os blocos seguintes deixam de ser determinantes
+    const fs=$("#fs_admiss");
+    const seguintes=[fs,fs&&fs.nextElementSibling,fs&&fs.nextElementSibling&&fs.nextElementSibling.nextElementSibling];
+    seguintes.forEach(el=>{if(el&&el.tagName==="FIELDSET")el.style.opacity=inab?".45":"1";});
+    return {inab,marcadas};
+  }
+  document.querySelectorAll(".hip").forEach(c=>c.addEventListener("change",()=>{atualizaHab();atualizar();}));
+  atualizaHab();
+
   // botões Sim/Não
   document.querySelectorAll("[data-req]").forEach(g=>{
     g.addEventListener("click",e=>{
@@ -1499,28 +1604,38 @@ function formAdmissibilidade(atual,onSave){
   CRITS.forEach(c=>$("#"+c[0]).addEventListener("change",()=>{d[c[0]]=Number($("#"+c[0]).value);atualizar();}));
 
   function atualizar(){
+    const marcadas=hipMarcadas();
     const r=calcAdmiss(d);
+    const sug = marcadas.length? "Inabilitada" : r.sugestao;
     const faltam=REQS.filter(x=>d[x[0]]===undefined).length;
     $("#placar").innerHTML=`
-      <span class="veredito ${r.sugestao==='Admissível'?'ok':'no'}">Sugestão: ${r.sugestao}</span>
-      <span><span class="big">${r.pontuacao}</span><span class="muted small">/12</span></span>
-      <span class="muted small">Prioridade sugerida: <b>${r.prioridade}</b></span>
-      ${faltam?`<span class="muted small" style="margin-left:auto">${faltam} requisito(s) sem resposta</span>`:''}`;
-    if(!$("#resultado").dataset.tocado)$("#resultado").value=r.sugestao;
+      <span class="veredito ${sug==='Habilitada'?'ok':'no'}">Sugestão: ${sug}</span>
+      ${marcadas.length?`<span class="muted small">por hipótese de inabilitação</span>`
+        :`<span><span class="big">${r.pontuacao}</span><span class="muted small">/12</span></span>
+          <span class="muted small">Prioridade sugerida: <b>${r.prioridade}</b></span>`}
+      ${(!marcadas.length&&faltam)?`<span class="muted small" style="margin-left:auto">${faltam} requisito(s) sem resposta</span>`:''}`;
+    if(!$("#resultado").dataset.tocado)$("#resultado").value=sug;
   }
   $("#resultado").addEventListener("change",e=>{e.target.dataset.tocado="1";});
   atualizar();
 
   $("#save").onclick=()=>{
+    const inabilitada=$("#resultado").value==="Inabilitada";
     const faltam=REQS.filter(x=>d[x[0]]===undefined);
-    if(faltam.length){toast("Responda todos os requisitos do bloco 1.");return;}
+    if(!inabilitada && faltam.length){toast("Responda todos os requisitos de habilitação.");return;}
+    if(inabilitada && !hipMarcadas().length && !$("#fundamentacao").value.trim()){
+      toast("Marque a hipótese de inabilitação ou fundamente a decisão.");return;}
     const r=calcAdmiss(d);
+    const sugerido=hipMarcadas().length?"Inabilitada":r.sugestao;
     const decisao=$("#resultado").value;
-    const divergente=decisao!==r.sugestao;
+    const divergente=decisao!==sugerido;
     const fund=$("#fundamentacao").value.trim();
     if(divergente && !fund){toast("A decisão divergiu da sugestão — a fundamentação é obrigatória.");$("#fundamentacao").focus();return;}
     if(!$("#responsavel").value){toast("Informe o responsável pela análise.");return;}
     const dados={
+      habilitacao:$("#resultado").value,
+      hipoteses_inabilit:hipMarcadas(),
+      motivo_inabilitacao:$("#motivo_inab").value.trim()||null,
       req_competencia:!!d.req_competencia, req_fato:!!d.req_fato, req_autoria:!!d.req_autoria,
       req_duplicidade:!!d.req_duplicidade, req_prescricao:!!d.req_prescricao,
       c_materialidade:Number(d.c_materialidade)||0, c_relevancia:Number(d.c_relevancia)||0,
@@ -1533,7 +1648,7 @@ function formAdmissibilidade(atual,onSave){
       data_analise:today()
     };
     close();
-    toast("Admissibilidade registrada — salve o processo para gerar o identificador.");
+    toast("Habilitação registrada — salve o processo para gerar o identificador.");
     if(onSave)onSave(dados);
   };
 }
@@ -1771,6 +1886,7 @@ const AUXDEFS=[
   {key:"tipos_tratativa",tbl:"aux_tipos_tratativa",label:"Tipos de Tratativa",cols:[["nome","Nome"]],simple:true},
   {key:"tipos_irregularidade",tbl:"aux_tipos_irregularidade",label:"Tipos de Irregularidade (CGM)",cols:[["nome","Nome"]],simple:true},
   {key:"feriados",tbl:"aux_feriados",label:"Feriados (exceções)",cols:[["data","Data"],["nome","Nome"],["tipo","Tipo"]]},
+  {key:"hipoteses_inabilit",tbl:"aux_hipoteses_inabilitacao",label:"Hipóteses de Inabilitação",cols:[["nome","Hipótese"],["fundamento","Fundamento"]]},
 ];
 let auxTab="taxonomia";
 async function renderAuxiliares(){
