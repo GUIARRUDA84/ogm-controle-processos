@@ -954,6 +954,11 @@ function formProcesso(p){
         <div id="cgm_resumo" style="margin-top:10px"></div>
       </fieldset>
 
+      ${isEdit?`<fieldset><legend>Tramitação do processo</legend>
+        <div id="hist_tram"><p class="muted small" style="margin:0">Carregando histórico…</p></div>
+        <button type="button" class="btn ghost sm" id="add_trat_proc" style="margin-top:10px">+ Inserir tratativa</button>
+      </fieldset>`:''}
+
       <fieldset><legend>Situação e observações</legend>
         <div class="frow">
           <div><label class="f">Situação</label><select id="status">${stOpt}</select></div>
@@ -995,6 +1000,41 @@ function formProcesso(p){
 
   // ODS toggle
   $("#odsbox").addEventListener("click",e=>{const o=e.target.closest(".odsopt");if(o)o.classList.toggle("on");});
+  // ---------- HISTÓRICO DE TRAMITAÇÃO (somente leitura) ----------
+  async function pintaHistorico(){
+    const box=$("#hist_tram");
+    if(!box)return;
+    const [rt,ro]=await Promise.all([
+      sb.from("tratativas").select("*").eq("processo_id",p.id).order("data",{ascending:false}),
+      sb.from("observacoes").select("*").eq("processo_id",p.id).order("data",{ascending:false})
+    ]);
+    const T=(rt.data||[]).map(x=>Object.assign({_k:"t"},x));
+    const O=(ro.data||[]).map(x=>Object.assign({_k:"o"},x));
+    const tudo=T.concat(O).sort((a,b)=>String(b.data||"").localeCompare(String(a.data||"")));
+    if(!tudo.length){box.innerHTML=`<p class="muted small" style="margin:0">Nenhuma tratativa registrada. Use o botão abaixo ou a aba <b>Tramitação Processual</b>.</p>`;return;}
+    box.innerHTML=tudo.map(x=>x._k==="t"
+      ? `<div class="trat">${x.tipo?`<span class="chip blue">${esc(x.tipo)}</span> `:''}${esc(x.texto)}<div class="meta">${esc(x.autor||'—')} · ${fmtDate(x.data)}</div></div>`
+      : `<div class="trat" style="border-left-color:var(--amarelo);background:#fffdf5"><span class="chip amber">Observação</span> ${esc(x.texto)}<div class="meta">${esc(x.autor||'—')} · ${fmtDate(x.data)}</div></div>`
+    ).join("");
+  }
+  if(isEdit && p.id){
+    pintaHistorico();
+    const bt=$("#add_trat_proc");
+    if(bt)bt.onclick=()=>formTratativa(p.id,async()=>{
+      await pintaHistorico();
+      // reflete no formulário aberto o que a tratativa alterou
+      const {data:atual}=await sb.from("processos")
+        .select("doc_tipo,doc_numero,doc_data_saida,status,updated_at").eq("id",p.id).single();
+      if(atual){
+        if(atual.doc_tipo)$("#doc_tipo").value=atual.doc_tipo;
+        if(atual.doc_numero)$("#doc_numero").value=atual.doc_numero;
+        if(atual.doc_data_saida)$("#doc_data_saida").value=atual.doc_data_saida;
+        if(atual.status)$("#status").value=atual.status;
+        p.updated_at=atual.updated_at;  // mantém a trava de concorrência coerente
+      }
+    });
+  }
+
   // ---------- MANIFESTAÇÕES (desmembramento) ----------
   let MANIFS=[];
   const orgListOpts=[...AUX.orgaos].sort(byPt('sigla'))
@@ -1541,7 +1581,7 @@ async function renderRecomendacoes(){
   </div>`;
   const sel=$("#rproc");
   sel.onchange=()=>{$("#addtrat").disabled=!sel.value;$("#addobs").disabled=!sel.value;};
-  $("#addtrat").onclick=()=>{if(sel.value)formTratativa(sel.value);};
+  $("#addtrat").onclick=()=>{if(sel.value)formTratativa(sel.value,()=>renderRecomendacoes());};
   $("#addobs").onclick=()=>{if(sel.value)formObservacao(sel.value);};
   $("#tforgao").value=filtroTram.orgao;$("#tforgao").onchange=e=>{filtroTram.orgao=e.target.value;drawTram();};
   $("#tfserv").value=filtroTram.servidor;$("#tfserv").onchange=e=>{filtroTram.servidor=e.target.value;drawTram();};
@@ -1615,30 +1655,71 @@ function formObservacao(processoId){
     close();toast("Observação registrada.");renderRecomendacoes();
   };
 }
-function formTratativa(processoId){
+function formTratativa(processoId,aoSalvar){
+  const proc=PROCESSOS.find(x=>x.id===processoId)||{};
   const tiposOpt=`<option value="">Selecione…</option>`+[...AUX.tipos_tratativa].sort(byPt()).map(t=>`<option>${esc(t)}</option>`).join("");
   const autorOpt=`<option value="">Selecione…</option>`+[...AUX.servidores].sort(byPt('nome')).map(s=>`<option>${esc(s.nome)}</option>`).join("");
-  modalRoot.innerHTML=`<div class="overlay"><div class="modal" style="max-width:640px">
+  const stOpt=`<option value="">Manter a situação atual</option>`+[...AUX.status].sort(byPt()).map(s=>`<option>${esc(s)}</option>`).join("");
+  modalRoot.innerHTML=`<div class="overlay"><div class="modal" style="max-width:660px">
     <div class="modal-head"><h3>Inserir Tratativa</h3><button class="x" id="mx">×</button></div>
     <div class="modal-body">
+      <p class="lead" style="margin:0 0 12px">Processo <b>${esc(proc.numero_sei||'(sem SEI)')}</b>${proc.status?` · situação atual: ${statusChip(proc.status)}`:''}</p>
       <div class="frow">
         <div><label class="f">Tipo de tratativa<span class="hint">Gerencie a lista em Gestão do Sistema → Tipos de Tratativa.</span></label><select id="ttipo">${tiposOpt}</select></div>
         <div><label class="f">Data</label><input type="date" id="tdata" value="${today()}"></div>
       </div>
       <div class="frow one"><div><label class="f">Descrição / providência</label><textarea id="ttexto" class="tall"></textarea></div></div>
-      <div class="frow one"><div><label class="f">Autor</label><select id="tautor">${autorOpt}</select></div></div>
+      <div class="frow">
+        <div><label class="f">Autor</label><select id="tautor">${autorOpt}</select></div>
+        <div><label class="f">Número do documento<span class="hint">Opcional — do documento emitido pela OGM.</span></label><input id="tnum"></div>
+      </div>
+
+      <fieldset style="margin-top:6px"><legend>Reflexo no processo</legend>
+        <label class="check" style="margin-bottom:10px"><input type="checkbox" id="t_doc" checked>
+          <span>Registrar como documento emitido pela OGM<span class="hint">Preenche o tipo, o número e a data de saída no cadastro do processo.</span></span></label>
+        <div class="frow one"><div><label class="f">Atualizar a situação do processo</label><select id="t_status">${stOpt}</select></div></div>
+      </fieldset>
     </div>
     <div class="modal-foot"><button class="btn ghost" id="cancel">Cancelar</button><button class="btn primary" id="save">Salvar</button></div>
   </div></div>`;
   const close=()=>modalRoot.innerHTML="";
   $("#mx").onclick=close;$("#cancel").onclick=close;
+
+  // se o tipo da tratativa não for um documento da OGM, desmarca o registro automático
+  $("#ttipo").addEventListener("change",()=>{
+    const t=$("#ttipo").value;
+    $("#t_doc").checked = !!t && (AUX.tipos_documento||[]).includes(t);
+  });
+
   $("#save").onclick=async()=>{
     const texto=$("#ttexto").value.trim();
     if(!texto){toast("Descreva a tratativa.");return;}
-    const rec={processo_id:processoId,tipo:$("#ttipo").value||null,texto,autor:$("#tautor").value||null,data:$("#tdata").value||today()};
+    const btn=$("#save");btn.disabled=true;btn.textContent="Salvando…";
+    const tipo=$("#ttipo").value||null, data=$("#tdata").value||today();
+    const rec={processo_id:processoId,tipo,texto,autor:$("#tautor").value||null,data};
     const {error}=await sb.from("tratativas").insert(rec);
-    if(error){toast("Erro: "+error.message);return;}
-    close();toast("Tratativa registrada.");renderRecomendacoes();
+    if(error){toast("Erro: "+error.message);btn.disabled=false;btn.textContent="Salvar";return;}
+
+    // ---- reflete no cadastro do processo ----
+    const upd={};
+    if($("#t_doc").checked && tipo && (AUX.tipos_documento||[]).includes(tipo)){
+      upd.doc_tipo=tipo; upd.doc_data_saida=data;
+      const n=$("#tnum").value.trim(); if(n)upd.doc_numero=n;
+    }else if($("#tnum").value.trim()){ upd.doc_numero=$("#tnum").value.trim(); }
+    if($("#t_status").value) upd.status=$("#t_status").value;
+    if(Object.keys(upd).length){
+      upd.updated_at=new Date().toISOString();
+      const {error:eu}=await sb.from("processos").update(upd).eq("id",processoId);
+      if(eu){toast("Tratativa salva, mas o processo não foi atualizado: "+eu.message);}
+      else{
+        const pr=PROCESSOS.find(x=>x.id===processoId);
+        if(pr)Object.assign(pr,upd);
+        toast("Tratativa registrada e processo atualizado.");
+      }
+    }else{ toast("Tratativa registrada."); }
+    invalidarCache();   // painel e lista de processos passam a refletir a mudança
+    close();
+    if(aoSalvar)aoSalvar(); else renderRecomendacoes();
   };
 }
 function formRecomendacao(processoId){
