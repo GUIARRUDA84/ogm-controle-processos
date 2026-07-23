@@ -167,6 +167,12 @@
   .manif-num{background:var(--azul);color:#fff;width:24px;height:24px;border-radius:50%;
     display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;flex:0 0 auto}
   .manif-acoes{margin-left:auto;display:flex;gap:6px}
+  .aviso-novo{position:fixed;top:96px;left:50%;transform:translateX(-50%);z-index:60;
+    background:var(--azul);color:#fff;border-radius:22px;padding:9px 18px;font-size:13px;font-weight:700;
+    box-shadow:0 6px 20px rgba(10,40,120,.3);cursor:pointer;display:none;border:0}
+  .aviso-novo.show{display:block}
+  .conflito{background:#fff4e5;border:1px solid #f0c890;color:#8a5200;border-radius:8px;
+    padding:10px 12px;font-size:12.5px;margin-bottom:12px}
   .codigo{font-family:ui-monospace,Consolas,monospace;font-size:16px;font-weight:800;color:var(--azul2);
     background:#e5edff;padding:8px 14px;border-radius:8px;display:inline-block;letter-spacing:.5px}
 </style>
@@ -218,6 +224,7 @@
 </nav>
 <main id="app"></main>
 <div id="modal-root"></div>
+<button id="aviso-novo" class="aviso-novo"></button>
 <div id="toast" class="toast"></div>
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
@@ -367,13 +374,35 @@ async function init(){
   sb = supabase.createClient(url, key);
   await loadAux();
   bindNav();
+  ligarTempoReal();
   go("painel");
 }
+// avisa quando outra pessoa cadastrar ou alterar um processo
+let DESATUALIZADO=false;
+function marcarDesatualizado(){
+  if(DESATUALIZADO)return;
+  DESATUALIZADO=true;
+  const b=$("#aviso-novo");
+  if(b){b.textContent="↻ Há alterações de outros usuários — clique para atualizar";b.classList.add("show");}
+}
+function limparAviso(){DESATUALIZADO=false;const b=$("#aviso-novo");if(b)b.classList.remove("show");}
+function ligarTempoReal(){
+  try{
+    sb.channel('ogm-processos')
+      .on('postgres_changes',{event:'*',schema:'public',table:'processos'},()=>{
+        invalidarCache();
+        if(!modalRoot.innerHTML) marcarDesatualizado(); // não interrompe quem está editando
+      })
+      .subscribe();
+  }catch(e){}
+}
 function bindNav(){
+  const b=$("#aviso-novo");
+  if(b)b.onclick=()=>{limparAviso();go(view);};
   $("#nav").addEventListener("click",e=>{const b=e.target.closest("button[data-v]");if(!b)return;go(b.dataset.v);});
 }
 function go(v){
-  view=v;
+  view=v;limparAviso();
   document.querySelectorAll("#nav button").forEach(b=>b.classList.toggle("on",b.dataset.v===v));
   if(v==="painel")renderPainel();
   else if(v==="processos")renderProcessos();
@@ -383,6 +412,22 @@ function go(v){
 
 /* dados auxiliares: usa o banco; se a tabela estiver vazia, cai no SEED (em memória) */
 async function loadAux(){
+  // 1 única chamada ao banco (função aux_todas). Se ela ainda não existir,
+  // cai no modo antigo, buscando as tabelas em paralelo.
+  try{
+    const {data,error}=await sb.rpc('aux_todas');
+    if(!error && data){
+      let vazio=true;
+      for(const k of Object.keys(data)){
+        const v=data[k];
+        if(v && v.length){AUX[k]=v;vazio=false;}else{AUX[k]=fallback(k);}
+      }
+      if(!vazio) return;
+    }
+  }catch(e){}
+  return loadAuxAntigo();
+}
+async function loadAuxAntigo(){
   const map = {
     taxonomia:"aux_taxonomia", ods:"aux_ods", lai_motivos:"aux_lai_motivos",
     servidores:"aux_servidores", unidades:"aux_unidades", orgaos:"aux_orgaos",
@@ -390,16 +435,17 @@ async function loadAux(){
     predios:"aux_predios", tipos_tratativa:"aux_tipos_tratativa",
     tipos_irregularidade:"aux_tipos_irregularidade", feriados:"aux_feriados"
   };
-  for(const [k,tbl] of Object.entries(map)){
-    try{
-      const {data,error}=await sb.from(tbl).select("*");
-      if(error)throw error;
-      if(data && data.length){
-        if(k==="tipos_demanda"||k==="tipos_documento"||k==="status"||k==="tipos_tratativa"||k==="tipos_irregularidade") AUX[k]=data.map(r=>r.nome);
-        else AUX[k]=data;
-      }else AUX[k]=fallback(k);
-    }catch(e){AUX[k]=fallback(k);}
-  }
+  // busca todas as tabelas EM PARALELO (antes era uma após a outra)
+  const chaves=Object.keys(map);
+  const res=await Promise.all(chaves.map(k=>
+    sb.from(map[k]).select("*").then(r=>r).catch(()=>({data:null}))));
+  chaves.forEach((k,i)=>{
+    const data=res[i]&&res[i].data;
+    if(data && data.length){
+      if(k==="tipos_demanda"||k==="tipos_documento"||k==="status"||k==="tipos_tratativa"||k==="tipos_irregularidade") AUX[k]=data.map(r=>r.nome);
+      else AUX[k]=data;
+    }else AUX[k]=fallback(k);
+  });
 }
 function fallback(k){
   if(k==="taxonomia")return SEED.taxonomia;
@@ -1162,8 +1208,12 @@ function formProcesso(p){
   $("#numero_sei").addEventListener("blur",async()=>{
     const v=$("#numero_sei").value.trim();
     if(!v){$("#sei_warn").classList.remove("show");return;}
-    const {data}=await sb.from("processos").select("id").eq("numero_sei",v).limit(2);
-    $("#sei_warn").classList.toggle("show",(data||[]).some(x=>x.id!==p.id));
+    const {data}=await sb.from("processos").select("id,servidor").eq("numero_sei",v).limit(2);
+    const outro=(data||[]).find(x=>x.id!==p.id);
+    const w=$("#sei_warn");
+    if(outro){w.textContent="Já existe um processo com este número SEI"+
+      (outro.servidor?" (responsável: "+outro.servidor+")":"")+". O sistema não permitirá duplicar.";}
+    w.classList.toggle("show",!!outro);
   });
 
   // Tramitação externa
@@ -1251,31 +1301,59 @@ function formProcesso(p){
     };
     $("#save").disabled=true;$("#save").textContent="Salvando…";
     let res;
-    if(isEdit) res=await sb.from("processos").update(rec).eq("id",p.id).select("id").single();
-    else res=await sb.from("processos").insert(rec).select("id").single();
-    if(res.error){toast("Erro ao salvar: "+res.error.message);$("#save").disabled=false;$("#save").textContent="Cadastrar processo";return;}
+    if(isEdit){
+      // só grava se ninguém tiver alterado o processo depois que você o abriu
+      let q=sb.from("processos").update(rec).eq("id",p.id);
+      if(p.updated_at) q=q.eq("updated_at",p.updated_at);
+      res=await q.select("id,updated_at");
+      if(!res.error && (!res.data || !res.data.length)){
+        // conflito: outra pessoa salvou antes
+        const {data:atual}=await sb.from("processos")
+          .select("servidor,status,updated_at").eq("id",p.id).single();
+        $("#save").disabled=false;$("#save").textContent="Salvar alterações";
+        const quando=atual&&atual.updated_at?new Date(atual.updated_at).toLocaleString('pt-BR'):"há instantes";
+        const aviso=document.createElement("div");
+        aviso.className="conflito";
+        aviso.innerHTML="<b>Este processo foi alterado por outra pessoa</b> ("+esc(quando)+
+          "). Para não sobrescrever o trabalho dela, suas alterações não foram gravadas.<br>"+
+          "Feche e abra o processo novamente para ver a versão atual e refazer o que for necessário.";
+        const corpo=document.querySelector(".modal-body");
+        if(corpo){corpo.insertBefore(aviso,corpo.firstChild);corpo.scrollTop=0;}
+        toast("Conflito de edição — nada foi sobrescrito.");
+        return;
+      }
+      if(!res.error && res.data && res.data.length) res={data:res.data[0]};
+    }else{
+      res=await sb.from("processos").insert(rec).select("id,updated_at").single();
+    }
+    if(res.error){
+      const dup=String(res.error.message||"").includes("ux_proc_sei")||res.error.code==="23505";
+      toast(dup?"Já existe um processo com este número SEI.":"Erro ao salvar: "+res.error.message);
+      $("#save").disabled=false;$("#save").textContent=isEdit?"Salvar alterações":"Cadastrar processo";return;
+    }
     const procId=(res.data&&res.data.id)||p.id;
 
-    // sincroniza as manifestações do processo
+    // as gravações seguintes são independentes: rodam em paralelo (mais rápido)
+    const tarefas=[];
     if(procId){
-      await sb.from("manifestacoes").delete().eq("processo_id",procId);
-      if(manifValidas.length){
-        const linhas=manifValidas.map((m,i)=>({processo_id:procId,sequencia:i+1,
-          orgao:m.orgao||null,descricao:m.descricao||null,status:m.status||null,
-          area:m.area||null,prazo:m.prazo||null}));
-        const {error:em}=await sb.from("manifestacoes").insert(linhas);
-        if(em)toast("Processo salvo, mas as manifestações falharam: "+em.message);
-      }
+      tarefas.push((async()=>{
+        await sb.from("manifestacoes").delete().eq("processo_id",procId);
+        if(manifValidas.length){
+          const linhas=manifValidas.map((m,i)=>({processo_id:procId,sequencia:i+1,
+            orgao:m.orgao||null,descricao:m.descricao||null,status:m.status||null,
+            area:m.area||null,prazo:m.prazo||null}));
+          const {error:em}=await sb.from("manifestacoes").insert(linhas);
+          if(em)toast("Processo salvo, mas as manifestações falharam: "+em.message);
+        }
+      })());
     }
-
-    // grava o juízo de admissibilidade (cria na primeira vez, atualiza nas demais)
     if($("#vinculo_cgm").checked && admiss && procId){
-      const r2=await salvarAdmiss(procId);
-      if(r2 && r2.codigo) admissCodigo=r2.codigo;
+      tarefas.push(salvarAdmiss(procId).then(r2=>{if(r2&&r2.codigo)admissCodigo=r2.codigo;}));
     }
     if(!$("#vinculo_cgm").checked && p.cgm_codigo){
-      await sb.from("processos").update({cgm_codigo:null}).eq("id",procId);
+      tarefas.push(sb.from("processos").update({cgm_codigo:null}).eq("id",procId));
     }
+    if(tarefas.length) await Promise.all(tarefas);
     invalidarCache();
     close();toast(isEdit?"Processo atualizado.":"Processo cadastrado.");
     if(view==="painel")renderPainel();else fetchRows();
