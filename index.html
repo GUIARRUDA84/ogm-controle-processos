@@ -421,6 +421,20 @@ async function renderPainel(){
     }
     CACHE.painel=S;CACHE.painelAt=Date.now();
   }
+  // Integração CGM — quadro gerencial da admissibilidade
+  let CGM={total:0,adm:0,inadm:0,valor:0,prio:[],tipo:[]};
+  try{
+    const {data:ad}=await sb.from("admissibilidade_cgm")
+      .select("resultado,prioridade,tipo_irregularidade,valor_estimado");
+    const A=ad||[];
+    const g=(campo)=>{const m={};A.forEach(x=>{const k=x[campo]||"(sem)";m[k]=(m[k]||0)+1;});
+      return Object.entries(m).sort((a,b)=>b[1]-a[1]);};
+    CGM={total:A.length,
+      adm:A.filter(x=>x.resultado==='Admissível').length,
+      inadm:A.filter(x=>x.resultado==='Inadmissível').length,
+      valor:A.reduce((s,x)=>s+(Number(x.valor_estimado)||0),0),
+      prio:g('prioridade'), tipo:g('tipo_irregularidade').slice(0,8)};
+  }catch(e){}
   const num=v=>(v==null?null:Number(v));
   const total=S.total||0, pct=n=>total?Math.round(n/total*100):0;
   const tmed=num(S.tmed), idadeMed=num(S.idade_med);
@@ -478,6 +492,19 @@ async function renderPainel(){
       </div>
     </div>
 
+    <div class="sec-title">Integração com a Controladoria-Geral (CGM)</div>
+    <div class="kpis">
+      <div class="card kpi b"><div class="n">${CGM.total}</div><div class="l">Processos vinculados à CGM</div><div class="sub2">${total?Math.round(CGM.total/total*100):0}% do total</div></div>
+      <div class="card kpi g"><div class="n">${CGM.adm}</div><div class="l">Admissíveis</div><div class="sub2">${CGM.total?Math.round(CGM.adm/CGM.total*100):0}% dos vinculados</div></div>
+      <div class="card kpi r"><div class="n">${CGM.inadm}</div><div class="l">Inadmissíveis</div><div class="sub2">${CGM.total?Math.round(CGM.inadm/CGM.total*100):0}% dos vinculados</div></div>
+      <div class="card kpi y"><div class="n" style="font-size:22px">R$ ${CGM.valor.toLocaleString('pt-BR',{maximumFractionDigits:0})}</div><div class="l">Valor estimado acumulado</div><div class="sub2">soma das apurações</div></div>
+    </div>
+    <div class="charts">
+      <div class="card chart-card"><h3>Admissibilidade</h3><p class="cap">Resultado do juízo de admissibilidade</p><div class="chart-box"><canvas id="ch_adm"></canvas></div></div>
+      <div class="card chart-card"><h3>Por prioridade</h3><p class="cap">Materialidade, relevância e criticidade</p><div class="chart-box"><canvas id="ch_prio"></canvas></div></div>
+      <div class="card chart-card"><h3>Por tipo de irregularidade</h3><p class="cap">Top 8 enquadramentos</p><div class="chart-box tallbox"><canvas id="ch_tipoirr"></canvas></div></div>
+    </div>
+
     <div class="sec-title">Análise georreferenciada</div>
     <div class="charts">
       <div class="card chart-card" style="grid-column:1 / -1">
@@ -513,6 +540,12 @@ async function renderPainel(){
   mkChart('ch_net','bar',['Emitidas','Acatadas','Não acatadas'],
     [S.net_emit||0,S.net_acat||0,Math.max(0,(S.net_emit||0)-(S.net_acat||0))],{colors:['#0056EF','#20BF40','#E23B2E']});
   mkChart('ch_bairro','bar',dBairro.map(x=>x[0]),dBairro.map(x=>x[1]),{horizontal:true,color:'#9A6A00'});
+  mkChart('ch_adm','doughnut',['Admissível','Inadmissível'],[CGM.adm,CGM.inadm]);
+  const ordemPrio=['Urgente','Alta','Média','Baixa'];
+  const prioOrd=ordemPrio.map(p=>[p,(CGM.prio.find(x=>x[0]===p)||[0,0])[1]]).filter(x=>x[1]>0);
+  mkChart('ch_prio','bar',prioOrd.map(x=>x[0]),prioOrd.map(x=>x[1]),
+    {colors:prioOrd.map(x=>({Urgente:'#E23B2E',Alta:'#F26522',"Média":'#EDA704',Baixa:'#20BF40'}[x[0]]||'#5a6480'))});
+  mkChart('ch_tipoirr','bar',CGM.tipo.map(x=>x[0]),CGM.tipo.map(x=>x[1]),{horizontal:true,color:'#7A5CF0'});
 
   if(typeof L!=='undefined' && document.getElementById('mapa')){
     PAINEL_MAP=L.map('mapa').setView([-23.3103,-51.1628],12);
@@ -808,6 +841,32 @@ function formProcesso(p){
   let admiss = null;      // dados do juízo de admissibilidade (memória)
   let admissCodigo = p.cgm_codigo || null;
 
+  // grava o juízo: cria se ainda não existe, atualiza se já existe
+  async function salvarAdmiss(procId){
+    if(!admiss) return null;
+    const dados=Object.assign({},admiss,{processo_id:procId,updated_at:new Date().toISOString()});
+    delete dados.id; delete dados.codigo; delete dados.created_at;
+    if(admiss.id){ // JÁ EXISTE → atualiza
+      const {data,error}=await sb.from("admissibilidade_cgm")
+        .update(dados).eq("id",admiss.id).select("id,codigo").single();
+      if(error){toast("Falha ao atualizar a admissibilidade: "+error.message);return null;}
+      if(data){admiss.id=data.id;admiss.codigo=data.codigo;
+        toast("Admissibilidade atualizada · "+data.codigo);return data;}
+      return null;
+    }
+    // NÃO EXISTE → cria e gera o identificador
+    const {data,error}=await sb.from("admissibilidade_cgm")
+      .insert(dados).select("id,codigo").single();
+    if(error){toast("Falha ao criar o vínculo CGM: "+error.message);return null;}
+    if(data){
+      await sb.from("processos").update({cgm_codigo:data.codigo}).eq("id",procId);
+      admiss.id=data.id;admiss.codigo=data.codigo;
+      toast("Vínculo CGM criado · "+data.codigo);
+      return data;
+    }
+    return null;
+  }
+
   function pintaResumoCGM(){
     const box=$("#cgm_resumo");
     if(!$("#vinculo_cgm").checked){box.innerHTML="";return;}
@@ -818,6 +877,9 @@ function formProcesso(p){
     }else{
       const a=admiss||{};
       const res=a.resultado||"—", pri=a.prioridade||"—", pt=(a.pontuacao!=null?a.pontuacao:"—");
+      const extra=[a.tipo_irregularidade?esc(a.tipo_irregularidade):null,
+        a.valor_estimado?("R$ "+Number(a.valor_estimado).toLocaleString('pt-BR',{minimumFractionDigits:2})):null,
+        a.responsavel?("Analista: "+esc(a.responsavel)):null].filter(Boolean).join(" · ");
       box.innerHTML=`<div class="cgm-box">
         <h4>Vínculo com a CGM</h4>
         ${admissCodigo?`<div class="codigo" id="cod_cgm">${esc(admissCodigo)}</div>
@@ -828,12 +890,22 @@ function formProcesso(p){
           <span class="muted small">Prioridade: <b>${esc(pri)}</b></span>
           <span class="muted small">Pontuação: <b>${pt}/12</b></span>
           <button type="button" class="btn ghost sm" id="abrir_adm" style="margin-left:auto">Rever critérios</button>
-        </div></div>`;
+        </div>
+        ${extra?`<p class="muted small" style="margin:8px 0 0">${extra}</p>`:''}
+        ${a.fundamentacao?`<p class="muted small" style="margin:4px 0 0">Fundamentação: ${esc(a.fundamentacao)}</p>`:''}
+        </div>`;
       const cp=$("#copiar_cod");
       if(cp)cp.onclick=()=>{navigator.clipboard.writeText(admissCodigo);toast("Identificador copiado.");};
     }
     const b=$("#abrir_adm");
-    if(b)b.onclick=()=>formAdmissibilidade(admiss,(dados)=>{admiss=dados;pintaResumoCGM();});
+    if(b)b.onclick=()=>formAdmissibilidade(admiss,async(dados)=>{
+      // preserva id/codigo já existentes ao reescrever os dados
+      admiss=Object.assign({},dados,{id:(admiss&&admiss.id)||null,codigo:(admiss&&admiss.codigo)||null});
+      if(!admiss.id)delete admiss.id;
+      // processo já salvo? grava na hora. Senão, grava junto com o processo.
+      if(isEdit && p.id){const r=await salvarAdmiss(p.id);if(r&&r.codigo)admissCodigo=r.codigo;}
+      pintaResumoCGM();
+    });
   }
 
   $("#vinculo_cgm").addEventListener("change",e=>{
@@ -980,16 +1052,10 @@ function formProcesso(p){
     if(res.error){toast("Erro ao salvar: "+res.error.message);$("#save").disabled=false;$("#save").textContent="Cadastrar processo";return;}
     const procId=(res.data&&res.data.id)||p.id;
 
-    // grava o juízo de admissibilidade e gera o identificador único da CGM
-    if($("#vinculo_cgm").checked && admiss && !admissCodigo && procId){
-      const {data:ad,error:er}=await sb.from("admissibilidade_cgm")
-        .insert(Object.assign({},admiss,{processo_id:procId})).select("codigo").single();
-      if(er){toast("Processo salvo, mas o vínculo CGM falhou: "+er.message);}
-      else if(ad){
-        await sb.from("processos").update({cgm_codigo:ad.codigo}).eq("id",procId);
-        admissCodigo=ad.codigo;
-        toast("Vínculo CGM criado · "+ad.codigo);
-      }
+    // grava o juízo de admissibilidade (cria na primeira vez, atualiza nas demais)
+    if($("#vinculo_cgm").checked && admiss && procId){
+      const r2=await salvarAdmiss(procId);
+      if(r2 && r2.codigo) admissCodigo=r2.codigo;
     }
     if(!$("#vinculo_cgm").checked && p.cgm_codigo){
       await sb.from("processos").update({cgm_codigo:null}).eq("id",procId);
